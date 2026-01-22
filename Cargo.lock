@@ -799,6 +799,19 @@ dependencies = [
  "multibase",
  "multihash 0.17.0",
  "serde",
+ "unsigned-varint 0.7.1",
+]
+
+[[package]]
+name = "cid"
+version = "0.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fd94671561e36e4e7de75f753f577edafb0e7c05d6e4547229fdf7938fbcd2c3"
+dependencies = [
+ "core2",
+ "multibase",
+ "multihash 0.18.1",
+ "serde",
  "serde_bytes",
  "unsigned-varint 0.7.1",
 ]
@@ -1592,7 +1605,7 @@ version = "1.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1e9c280362032ea4203659fc489832d0204ef09f247a0506f170dafcac08c369"
 dependencies = [
- "signature 1.6.4",
+ "signature 2.2.0",
 ]
 
 [[package]]
@@ -2736,7 +2749,7 @@ dependencies = [
  "async-stream",
  "async-trait",
  "bytes",
- "cid",
+ "cid 0.10.1",
  "config",
  "criterion",
  "futures",
@@ -2768,7 +2781,7 @@ dependencies = [
  "async-trait",
  "asynchronous-codec 0.6.2",
  "bytes",
- "cid",
+ "cid 0.10.1",
  "criterion",
  "deadqueue",
  "derivative",
@@ -2777,7 +2790,7 @@ dependencies = [
  "iroh-util",
  "keyed_priority_queue",
  "libp2p",
- "multihash 0.17.0",
+ "multihash 0.18.1",
  "names",
  "num_enum",
  "once_cell",
@@ -2800,12 +2813,12 @@ dependencies = [
 name = "iroh-car"
 version = "0.2.0"
 dependencies = [
- "cid",
+ "cid 0.10.1",
  "futures",
  "integer-encoding",
  "libipld",
  "libipld-cbor",
- "multihash 0.17.0",
+ "multihash 0.18.1",
  "thiserror 1.0.69",
  "tokio",
 ]
@@ -2873,7 +2886,7 @@ dependencies = [
  "async-trait",
  "axum",
  "bytes",
- "cid",
+ "cid 0.10.1",
  "clap 4.0.32",
  "config",
  "futures",
@@ -2963,7 +2976,7 @@ dependencies = [
  "async-trait",
  "axum",
  "bytes",
- "cid",
+ "cid 0.10.1",
  "clap 4.0.32",
  "config",
  "futures",
@@ -2997,7 +3010,7 @@ dependencies = [
  "async-trait",
  "asynchronous-codec 0.6.2",
  "bytes",
- "cid",
+ "cid 0.10.1",
  "clap 4.0.32",
  "config",
  "criterion",
@@ -3038,7 +3051,7 @@ dependencies = [
  "async-trait",
  "bs58 0.4.0",
  "bytes",
- "cid",
+ "cid 0.10.1",
  "fnv",
  "futures",
  "iroh-car",
@@ -3067,7 +3080,7 @@ dependencies = [
  "anyhow",
  "async-stream",
  "bytes",
- "cid",
+ "cid 0.10.1",
  "config",
  "futures",
  "hyper",
@@ -3089,7 +3102,7 @@ version = "0.2.0"
 dependencies = [
  "anyhow",
  "bytes",
- "cid",
+ "cid 0.10.1",
  "derive_more",
  "futures",
  "libp2p",
@@ -3108,7 +3121,7 @@ dependencies = [
  "async-trait",
  "bincode",
  "bytes",
- "cid",
+ "cid 0.10.1",
  "clap 4.0.32",
  "futures",
  "iroh-metrics",
@@ -3140,7 +3153,7 @@ dependencies = [
  "async-trait",
  "bytecheck",
  "bytes",
- "cid",
+ "cid 0.10.1",
  "clap 4.0.32",
  "config",
  "criterion",
@@ -3152,7 +3165,7 @@ dependencies = [
  "iroh-rpc-types",
  "iroh-util",
  "libipld",
- "multihash 0.17.0",
+ "multihash 0.18.1",
  "names",
  "opentelemetry",
  "rayon",
@@ -3178,7 +3191,7 @@ dependencies = [
  "async-trait",
  "base64 0.20.0",
  "bytes",
- "cid",
+ "cid 0.10.1",
  "config",
  "criterion",
  "fastmurmur3",
@@ -3190,7 +3203,7 @@ dependencies = [
  "iroh-util",
  "libipld",
  "libp2p",
- "multihash 0.17.0",
+ "multihash 0.18.1",
  "num_enum",
  "once_cell",
  "proptest",
@@ -3213,7 +3226,7 @@ name = "iroh-util"
 version = "0.2.0"
 dependencies = [
  "anyhow",
- "cid",
+ "cid 0.10.1",
  "config",
  "ctrlc",
  "dirs-next",
@@ -3375,7 +3388,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b7a704ba3b25dee9e7a2361fae2c7c19defae2a92e69ae96ffb203996705cd7c"
 dependencies = [
  "anyhow",
- "cid",
+ "cid 0.9.0",
  "core2",
  "multibase",
  "multihash 0.17.0",
@@ -4221,6 +4234,23 @@ name = "multihash"
 version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "835d6ff01d610179fbce3de1694d007e500bf33a7f29689838941d6bf783ae40"
+dependencies = [
+ "blake2b_simd",
+ "blake2s_simd",
+ "blake3",
+ "core2",
+ "digest 0.10.7",
+ "multihash-derive",
+ "sha2 0.10.9",
+ "sha3",
+ "unsigned-varint 0.7.1",
+]
+
+[[package]]
+name = "multihash"
+version = "0.18.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cfd8a792c1694c6da4f68db0a9d707c72bd260994da179e6030a5dcee00bb815"
 dependencies = [
  "blake2b_simd",
  "blake2s_simd",

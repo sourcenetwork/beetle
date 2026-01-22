@@ -26,7 +26,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tracing::{debug, trace, warn};
 
-use self::client::{Client, Config as ClientConfig};
+use self::client::Config as ClientConfig;
 use self::message::BitswapMessage;
 use self::network::Network;
 use self::network::OutEvent;
@@ -46,6 +46,7 @@ pub mod message;
 pub mod peer_task_queue;
 
 pub use self::block::{tests::*, Block};
+pub use self::client::Client;
 pub use self::protocol::ProtocolId;
 
 const DIAL_BACK_OFF: Duration = Duration::from_secs(10 * 60);
