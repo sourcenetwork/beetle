@@ -6,7 +6,8 @@ use asynchronous_codec::{Decoder, Encoder, Framed};
 use bytes::{Bytes, BytesMut};
 use futures::future;
 use futures::io::{AsyncRead, AsyncWrite};
-use libp2p::core::{InboundUpgrade, OutboundUpgrade, ProtocolName, UpgradeInfo};
+use libp2p::core::{InboundUpgrade, OutboundUpgrade, UpgradeInfo};
+use libp2p::StreamProtocol;
 use prost::Message;
 use unsigned_varint::codec;
 
@@ -22,37 +23,45 @@ pub enum ProtocolId {
     Bitswap120 = 3,
 }
 
-impl ProtocolName for ProtocolId {
-    fn protocol_name(&self) -> &[u8] {
+impl ProtocolId {
+    pub fn protocol_name(&self) -> &'static str {
         match self {
-            ProtocolId::Legacy => b"/ipfs/bitswap",
-            ProtocolId::Bitswap100 => b"/ipfs/bitswap/1.0.0",
-            ProtocolId::Bitswap110 => b"/ipfs/bitswap/1.1.0",
-            ProtocolId::Bitswap120 => b"/ipfs/bitswap/1.2.0",
+            ProtocolId::Legacy => "/ipfs/bitswap",
+            ProtocolId::Bitswap100 => "/ipfs/bitswap/1.0.0",
+            ProtocolId::Bitswap110 => "/ipfs/bitswap/1.1.0",
+            ProtocolId::Bitswap120 => "/ipfs/bitswap/1.2.0",
         }
     }
-}
 
-impl ProtocolId {
+    pub fn as_stream_protocol(&self) -> StreamProtocol {
+        StreamProtocol::new(self.protocol_name())
+    }
+
+    pub fn try_from_str(value: &str) -> Option<Self> {
+        match value {
+            "/ipfs/bitswap" => Some(ProtocolId::Legacy),
+            "/ipfs/bitswap/1.0.0" => Some(ProtocolId::Bitswap100),
+            "/ipfs/bitswap/1.1.0" => Some(ProtocolId::Bitswap110),
+            "/ipfs/bitswap/1.2.0" => Some(ProtocolId::Bitswap120),
+            _ => None,
+        }
+    }
+
     pub fn try_from(value: impl AsRef<[u8]>) -> Option<Self> {
         let value = value.as_ref();
-        if value == ProtocolId::Legacy.protocol_name() {
-            Some(ProtocolId::Legacy)
-        } else if value == ProtocolId::Bitswap100.protocol_name() {
-            Some(ProtocolId::Bitswap100)
-        } else if value == ProtocolId::Bitswap110.protocol_name() {
-            Some(ProtocolId::Bitswap110)
-        } else if value == ProtocolId::Bitswap120.protocol_name() {
-            Some(ProtocolId::Bitswap120)
-        } else {
-            None
-        }
+        std::str::from_utf8(value).ok().and_then(Self::try_from_str)
     }
 }
 
 impl ProtocolId {
     pub fn supports_have(self) -> bool {
         matches!(self, ProtocolId::Bitswap120)
+    }
+}
+
+impl AsRef<str> for ProtocolId {
+    fn as_ref(&self) -> &str {
+        self.protocol_name()
     }
 }
 
@@ -79,11 +88,14 @@ impl Default for ProtocolConfig {
 }
 
 impl UpgradeInfo for ProtocolConfig {
-    type Info = ProtocolId;
+    type Info = StreamProtocol;
     type InfoIter = Vec<Self::Info>;
 
     fn protocol_info(&self) -> Self::InfoIter {
-        self.protocol_ids.clone()
+        self.protocol_ids
+            .iter()
+            .map(|p| p.as_stream_protocol())
+            .collect()
     }
 }
 
@@ -100,9 +112,11 @@ where
     fn upgrade_inbound(self, socket: TSocket, protocol_id: Self::Info) -> Self::Future {
         let mut length_codec = codec::UviBytes::default();
         length_codec.set_max_len(self.max_transmit_size);
+        let protocol = ProtocolId::try_from_str(protocol_id.as_ref())
+            .unwrap_or(ProtocolId::Bitswap120);
         Box::pin(future::ok(Framed::new(
             socket,
-            BitswapCodec::new(length_codec, protocol_id),
+            BitswapCodec::new(length_codec, protocol),
         )))
     }
 }
@@ -120,9 +134,11 @@ where
     fn upgrade_outbound(self, socket: TSocket, protocol_id: Self::Info) -> Self::Future {
         let mut length_codec = codec::UviBytes::default();
         length_codec.set_max_len(self.max_transmit_size);
+        let protocol = ProtocolId::try_from_str(protocol_id.as_ref())
+            .unwrap_or(ProtocolId::Bitswap120);
         Box::pin(future::ok(Framed::new(
             socket,
-            BitswapCodec::new(length_codec, protocol_id),
+            BitswapCodec::new(length_codec, protocol),
         )))
     }
 }

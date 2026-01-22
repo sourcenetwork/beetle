@@ -54,7 +54,6 @@ features = [
   "tcp",
   "quic",
   "dns",
-  "mplex",
   "request-response",
   "websocket",
   "serde",

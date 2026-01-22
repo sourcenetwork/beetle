@@ -109,7 +109,7 @@ iroh-util = { version = "0.2.0", path = "./iroh-util" }
 keyed_priority_queue = "0.4.1"
 lazy_static = "1.4"
 libipld = "0.15"
-libp2p = { version = "0.50", default-features = false }
+libp2p = { version = "0.53", default-features = false }
 lru = "0.8"
 mime = "0.3"
 mime_classifier = "0.0.1"

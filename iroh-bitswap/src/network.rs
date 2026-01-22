@@ -11,7 +11,8 @@ use cid::Cid;
 use futures::Stream;
 use iroh_metrics::{bitswap::BitswapMetrics, inc};
 use iroh_metrics::{core::MRecorder, record};
-use libp2p::{core::connection::ConnectionId, PeerId};
+use libp2p::swarm::ConnectionId;
+use libp2p::PeerId;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, error, info, trace};
 

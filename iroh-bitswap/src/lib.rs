@@ -16,12 +16,10 @@ use cid::Cid;
 use handler::{BitswapHandler, HandlerEvent};
 use iroh_metrics::record;
 use iroh_metrics::{bitswap::BitswapMetrics, core::MRecorder, inc};
-use libp2p::core::connection::ConnectionId;
-use libp2p::core::ConnectedPoint;
 use libp2p::swarm::dial_opts::DialOpts;
 use libp2p::swarm::{
-    CloseConnection, DialError, IntoConnectionHandler, NetworkBehaviour, NetworkBehaviourAction,
-    NotifyHandler, PollParameters,
+    CloseConnection, ConnectionClosed, ConnectionDenied, ConnectionId, DialFailure, FromSwarm,
+    NetworkBehaviour, NotifyHandler, THandler, THandlerInEvent, THandlerOutEvent, ToSwarm,
 };
 use libp2p::{Multiaddr, PeerId};
 use tokio::sync::{mpsc, oneshot};
@@ -259,7 +257,7 @@ impl<S: Store> Bitswap<S> {
     pub fn on_identify(&self, peer: &PeerId, protocols: &[String]) {
         if let Some(PeerState::Connected(conn_id)) = self.get_peer_state(peer) {
             let mut protocols: Vec<ProtocolId> =
-                protocols.iter().filter_map(ProtocolId::try_from).collect();
+                protocols.iter().filter_map(|s| ProtocolId::try_from_str(s)).collect();
             protocols.sort();
             if let Some(best_protocol) = protocols.last() {
                 self.set_peer_state(peer, PeerState::Responsive(conn_id, *best_protocol));
@@ -380,6 +378,10 @@ impl<S: Store> Bitswap<S> {
             }
         }
     }
+
+    fn new_handler(&self) -> BitswapHandler {
+        BitswapHandler::new(self.protocol_config.clone(), self.idle_timeout)
+    }
 }
 
 #[derive(Debug)]
@@ -399,71 +401,82 @@ pub enum BitswapEvent {
 
 impl<S: Store> NetworkBehaviour for Bitswap<S> {
     type ConnectionHandler = BitswapHandler;
-    type OutEvent = BitswapEvent;
+    type ToSwarm = BitswapEvent;
 
-    fn new_handler(&mut self) -> Self::ConnectionHandler {
-        let protocol_config = self.protocol_config.clone();
-        BitswapHandler::new(protocol_config, self.idle_timeout)
-    }
-
-    fn addresses_of_peer(&mut self, _peer_id: &PeerId) -> Vec<Multiaddr> {
-        Default::default()
-    }
-
-    fn inject_connection_established(
+    fn handle_established_inbound_connection(
         &mut self,
-        peer_id: &PeerId,
-        connection: &ConnectionId,
-        _endpoint: &ConnectedPoint,
-        _failed_addresses: Option<&Vec<Multiaddr>>,
-        other_established: usize,
-    ) {
-        trace!("connection established {} ({})", peer_id, other_established);
-        self.set_peer_state(peer_id, PeerState::Connected(*connection));
-        self.pause_dialing = false;
+        _connection_id: ConnectionId,
+        _peer: PeerId,
+        _local_addr: &Multiaddr,
+        _remote_addr: &Multiaddr,
+    ) -> Result<THandler<Self>, ConnectionDenied> {
+        Ok(self.new_handler())
     }
 
-    fn inject_connection_closed(
+    fn handle_established_outbound_connection(
         &mut self,
-        peer_id: &PeerId,
-        _conn: &ConnectionId,
-        _endpoint: &ConnectedPoint,
-        _handler: <Self::ConnectionHandler as IntoConnectionHandler>::Handler,
-        remaining_established: usize,
-    ) {
-        self.pause_dialing = false;
-        if remaining_established == 0 {
-            // Last connection, close it
-            self.set_peer_state(peer_id, PeerState::Disconnected)
-        }
+        _connection_id: ConnectionId,
+        _peer: PeerId,
+        _addr: &Multiaddr,
+        _role_override: libp2p::core::Endpoint,
+    ) -> Result<THandler<Self>, ConnectionDenied> {
+        Ok(self.new_handler())
     }
 
-    fn inject_dial_failure(
-        &mut self,
-        peer_id: Option<PeerId>,
-        _handler: Self::ConnectionHandler,
-        error: &DialError,
-    ) {
-        if let Some(peer_id) = peer_id {
-            if let DialError::ConnectionLimit(_) = error {
-                self.pause_dialing = true;
-                self.set_peer_state(&peer_id, PeerState::Disconnected);
-            } else {
-                self.set_peer_state(&peer_id, PeerState::DialFailure(Instant::now()));
+    fn on_swarm_event(&mut self, event: FromSwarm) {
+        match event {
+            FromSwarm::ConnectionEstablished(info) => {
+                trace!(
+                    "connection established {} ({})",
+                    info.peer_id,
+                    info.other_established
+                );
+                self.set_peer_state(&info.peer_id, PeerState::Connected(info.connection_id));
+                self.pause_dialing = false;
             }
-
-            trace!("inject_dial_failure {}, {:?}", peer_id, error);
-            let dials = &mut self.dials.lock().unwrap();
-            if let Some(mut dials) = dials.remove(&peer_id) {
-                while let Some((_id, sender)) = dials.pop() {
-                    let _ = sender.send(Err(error.to_string()));
+            FromSwarm::ConnectionClosed(ConnectionClosed {
+                peer_id,
+                remaining_established,
+                ..
+            }) => {
+                self.pause_dialing = false;
+                if remaining_established == 0 {
+                    // Last connection, close it
+                    self.set_peer_state(&peer_id, PeerState::Disconnected)
                 }
             }
+            FromSwarm::DialFailure(DialFailure {
+                peer_id,
+                error,
+                ..
+            }) => {
+                if let Some(peer_id) = peer_id {
+                    if matches!(error, libp2p::swarm::DialError::Denied { .. }) {
+                        self.pause_dialing = true;
+                        self.set_peer_state(&peer_id, PeerState::Disconnected);
+                    } else {
+                        self.set_peer_state(&peer_id, PeerState::DialFailure(Instant::now()));
+                    }
+
+                    trace!("dial_failure {}, {:?}", peer_id, error);
+                    let dials = &mut self.dials.lock().unwrap();
+                    if let Some(mut dials) = dials.remove(&peer_id) {
+                        while let Some((_id, sender)) = dials.pop() {
+                            let _ = sender.send(Err(error.to_string()));
+                        }
+                    }
+                }
+            }
+            _ => {}
         }
     }
 
-    fn inject_event(&mut self, peer_id: PeerId, connection: ConnectionId, event: HandlerEvent) {
-        // trace!("inject_event from {}, event: {:?}", peer_id, event);
+    fn on_connection_handler_event(
+        &mut self,
+        peer_id: PeerId,
+        connection: ConnectionId,
+        event: THandlerOutEvent<Self>,
+    ) {
         match event {
             HandlerEvent::Connected { protocol } => {
                 self.set_peer_state(&peer_id, PeerState::Responsive(connection, protocol));
@@ -506,12 +519,10 @@ impl<S: Store> NetworkBehaviour for Bitswap<S> {
         }
     }
 
-    #[allow(clippy::type_complexity)]
     fn poll(
         &mut self,
         cx: &mut Context,
-        _: &mut impl PollParameters,
-    ) -> Poll<NetworkBehaviourAction<Self::OutEvent, Self::ConnectionHandler>> {
+    ) -> Poll<ToSwarm<Self::ToSwarm, THandlerInEvent<Self>>> {
         inc!(BitswapMetrics::NetworkBehaviourActionPollTick);
         // limit work
         for _ in 0..50 {
@@ -522,7 +533,7 @@ impl<S: Store> NetworkBehaviour for Bitswap<S> {
                         if let Err(err) = response.send(()) {
                             warn!("failed to send disconnect response {:?}", err)
                         }
-                        return Poll::Ready(NetworkBehaviourAction::CloseConnection {
+                        return Poll::Ready(ToSwarm::CloseConnection {
                             peer_id,
                             connection: CloseConnection::All,
                         });
@@ -572,17 +583,16 @@ impl<S: Store> NetworkBehaviour for Bitswap<S> {
                                     .or_default()
                                     .push((id, response));
 
-                                return Poll::Ready(NetworkBehaviourAction::Dial {
+                                return Poll::Ready(ToSwarm::Dial {
                                     opts: DialOpts::peer_id(peer)
                                         .condition(libp2p::swarm::dial_opts::PeerCondition::Always)
                                         .build(),
-                                    handler: self.new_handler(),
                                 });
                             }
                         }
                     }
                     OutEvent::GenerateEvent(ev) => {
-                        return Poll::Ready(NetworkBehaviourAction::GenerateEvent(ev))
+                        return Poll::Ready(ToSwarm::GenerateEvent(ev))
                     }
                     OutEvent::SendMessage {
                         peer,
@@ -591,7 +601,7 @@ impl<S: Store> NetworkBehaviour for Bitswap<S> {
                         connection_id,
                     } => {
                         tracing::debug!("send message {}", peer);
-                        return Poll::Ready(NetworkBehaviourAction::NotifyHandler {
+                        return Poll::Ready(ToSwarm::NotifyHandler {
                             peer_id: peer,
                             handler: NotifyHandler::One(connection_id),
                             event: handler::BitswapHandlerIn::Message(message, response),
@@ -600,7 +610,7 @@ impl<S: Store> NetworkBehaviour for Bitswap<S> {
                     OutEvent::ProtectPeer { peer } => {
                         if let Some(PeerState::Responsive(conn_id, _)) = self.get_peer_state(&peer)
                         {
-                            return Poll::Ready(NetworkBehaviourAction::NotifyHandler {
+                            return Poll::Ready(ToSwarm::NotifyHandler {
                                 peer_id: peer,
                                 handler: NotifyHandler::One(conn_id),
                                 event: handler::BitswapHandlerIn::Protect,
@@ -611,7 +621,7 @@ impl<S: Store> NetworkBehaviour for Bitswap<S> {
                         if let Some(PeerState::Responsive(conn_id, _)) = self.get_peer_state(&peer)
                         {
                             let _ = response.send(true);
-                            return Poll::Ready(NetworkBehaviourAction::NotifyHandler {
+                            return Poll::Ready(ToSwarm::NotifyHandler {
                                 peer_id: peer,
                                 handler: NotifyHandler::One(conn_id),
                                 event: handler::BitswapHandlerIn::Unprotect,
@@ -639,10 +649,11 @@ mod tests {
     use libp2p::core::transport::upgrade::Version;
     use libp2p::core::transport::Boxed;
     use libp2p::identity::Keypair;
+    use libp2p::noise;
     use libp2p::swarm::SwarmEvent;
     use libp2p::tcp::{tokio::Transport as TcpTransport, Config as TcpConfig};
-    use libp2p::yamux::YamuxConfig;
-    use libp2p::{noise, PeerId, Swarm, Transport};
+    use libp2p::yamux::Config as YamuxConfig;
+    use libp2p::{PeerId, Swarm, Transport};
     use tokio::sync::{mpsc, RwLock};
     use tracing::{info, trace};
     use tracing_subscriber::{fmt, prelude::*, EnvFilter};
@@ -676,19 +687,11 @@ mod tests {
 
     fn mk_transport() -> (PeerId, Boxed<(PeerId, StreamMuxerBox)>) {
         let local_key = Keypair::generate_ed25519();
-
-        let auth_config = {
-            let dh_keys = noise::Keypair::<noise::X25519Spec>::new()
-                .into_authentic(&local_key)
-                .expect("Noise key generation failed");
-
-            noise::NoiseConfig::xx(dh_keys).into_authenticated()
-        };
-
         let peer_id = local_key.public().to_peer_id();
+
         let transport = TcpTransport::new(TcpConfig::default().nodelay(true))
             .upgrade(Version::V1)
-            .authenticate(auth_config)
+            .authenticate(noise::Config::new(&local_key).expect("Noise config creation failed"))
             .multiplex(YamuxConfig::default())
             .timeout(Duration::from_secs(20))
             .map(|(peer_id, muxer), _| (peer_id, StreamMuxerBox::new(muxer)))
@@ -776,7 +779,12 @@ mod tests {
         let (peer1_id, trans) = mk_transport();
         let store1 = TestStore::default();
         let bs1 = Bitswap::new(peer1_id, store1.clone(), Config::default()).await;
-        let mut swarm1 = Swarm::with_tokio_executor(trans, bs1, peer1_id);
+        let mut swarm1 = Swarm::new(
+            trans,
+            bs1,
+            peer1_id,
+            libp2p::swarm::Config::with_tokio_executor(),
+        );
         let blocks = (0..N).map(|_| create_random_block_v1()).collect::<Vec<_>>();
 
         for block in &blocks {
@@ -809,7 +817,12 @@ mod tests {
         let store2 = TestStore::default();
         let bs2 = Bitswap::new(peer2_id, store2.clone(), Config::default()).await;
 
-        let mut swarm2 = Swarm::with_tokio_executor(trans, bs2, peer2_id);
+        let mut swarm2 = Swarm::new(
+            trans,
+            bs2,
+            peer2_id,
+            libp2p::swarm::Config::with_tokio_executor(),
+        );
 
         let swarm2_bs = swarm2.behaviour().clone();
         let peer2 = tokio::task::spawn(async move {
