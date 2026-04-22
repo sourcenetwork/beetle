@@ -43,20 +43,41 @@ pub struct TaskInfo {
     have_block: bool,
 }
 
-// Used to accept / deny requests for a CID coming from a PeerID
-// It should return true if the request should be fullfilled.
+// Used to accept / deny requests for a CID coming from a PeerID.
+// Returns a future that resolves to true if the request should be fulfilled.
+// The async signature lets filters perform I/O (e.g. blockstore lookups or
+// per-peer authorization checks) without blocking the decision worker.
+//
+// The previous sync variant of this trait required `Debug`, which rules out
+// capturing closures as the concrete type (closures don't implement `Debug`
+// on stable). Config's `Debug` impl is now manual and skips the filter field.
 pub trait PeerBlockRequestFilter:
-    Fn(&PeerId, &Cid) -> bool + Debug + 'static + Sync + Send
+    Fn(
+        &PeerId,
+        &Cid,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'static>>
+    + 'static
+    + Sync
+    + Send
 {
 }
 
-impl<F: Fn(&PeerId, &Cid) -> bool + Debug + 'static + Sync + Send> PeerBlockRequestFilter for F {}
+impl<F> PeerBlockRequestFilter for F where
+    F: Fn(
+            &PeerId,
+            &Cid,
+        )
+            -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'static>>
+        + 'static
+        + Sync
+        + Send
+{
+}
 
 /// Assigns a specifc score to a peer.
 pub trait ScorePeerFunc: Fn(&PeerId, usize) + Send + Sync {}
 impl<F: Fn(&PeerId, usize) + Send + Sync> ScorePeerFunc for F {}
 
-#[derive(Debug)]
 pub struct Config {
     pub peer_block_request_filter: Option<Box<dyn PeerBlockRequestFilter>>,
     // TODO: check if this needs to be configurable
@@ -80,6 +101,29 @@ pub struct Config {
     pub max_replace_size: usize,
 }
 
+impl Debug for Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Config")
+            .field(
+                "peer_block_request_filter",
+                &self.peer_block_request_filter.as_ref().map(|_| "<fn>"),
+            )
+            .field("engine_task_worker_count", &self.engine_task_worker_count)
+            .field("send_dont_haves", &self.send_dont_haves)
+            .field(
+                "engine_blockstore_worker_count",
+                &self.engine_blockstore_worker_count,
+            )
+            .field("target_message_size", &self.target_message_size)
+            .field(
+                "max_outstanding_bytes_per_peer",
+                &self.max_outstanding_bytes_per_peer,
+            )
+            .field("max_replace_size", &self.max_replace_size)
+            .finish()
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Config {
@@ -96,7 +140,6 @@ impl Default for Config {
 
 // Note: tagging peers is not supported by rust-libp2p, so currently not implemented
 
-#[derive(Debug)]
 pub struct Engine<S: Store> {
     /// Priority queue of requests received from peers.
     peer_task_queue: PeerTaskQueue<Cid, TaskData, TaskMerger>,
@@ -118,6 +161,22 @@ pub struct Engine<S: Store> {
     /// List of handles to worker threads.
     workers: Vec<(oneshot::Sender<()>, JoinHandle<()>)>,
     work_signal: Arc<Notify>,
+}
+
+impl<S: Store> Debug for Engine<S> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Engine")
+            .field(
+                "peer_block_request_filter",
+                &self.peer_block_request_filter.as_ref().map(|_| "<fn>"),
+            )
+            .field("send_dont_haves", &self.send_dont_haves)
+            .field(
+                "max_block_size_replace_has_with_block",
+                &self.max_block_size_replace_has_with_block,
+            )
+            .finish_non_exhaustive()
+    }
 }
 
 impl<S: Store> Engine<S> {
@@ -337,7 +396,7 @@ impl<S: Store> Engine<S> {
         }
 
         let mut new_work_exists = false;
-        let (wants, cancels, denials) = self.split_wants(peer, message.wantlist());
+        let (wants, cancels, denials) = self.split_wants(peer, message.wantlist()).await;
 
         // get block sizes
         let mut want_ks = AHashSet::new();
@@ -476,7 +535,7 @@ impl<S: Store> Engine<S> {
         }
     }
 
-    fn split_wants<'a>(
+    async fn split_wants<'a>(
         &self,
         peer: &PeerId,
         entries: impl Iterator<Item = &'a Entry>,
@@ -489,7 +548,7 @@ impl<S: Store> Engine<S> {
             if entry.cancel {
                 cancels.push(entry);
             } else if let Some(ref filter) = self.peer_block_request_filter {
-                if (filter)(peer, &entry.cid) {
+                if (filter)(peer, &entry.cid).await {
                     wants.push(entry);
                 } else {
                     denials.push(entry);
