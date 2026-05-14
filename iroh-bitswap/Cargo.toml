@@ -24,8 +24,6 @@ cid.workspace = true
 deadqueue.workspace = true
 derivative.workspace = true
 futures.workspace = true
-iroh-metrics = { workspace = true, features = ["bitswap"] }
-iroh-util.workspace = true
 keyed_priority_queue.workspace = true
 libp2p = { workspace = true, features = ["ping"] }
 multihash.workspace = true
@@ -36,7 +34,7 @@ prost.workspace = true
 rand.workspace = true
 smallvec.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["sync"] }
+tokio = { workspace = true, features = ["rt", "sync"] }
 tokio-context.workspace = true
 tokio-stream.workspace = true
 tracing.workspace = true

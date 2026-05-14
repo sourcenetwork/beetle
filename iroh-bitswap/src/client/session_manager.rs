@@ -6,11 +6,11 @@ use std::{
     time::Duration,
 };
 
+use crate::iroh_metrics::{bitswap::BitswapMetrics, core::MRecorder, inc};
 use ahash::AHashMap;
 use anyhow::{anyhow, Result};
 use cid::Cid;
 use futures::FutureExt;
-use iroh_metrics::{bitswap::BitswapMetrics, core::MRecorder, inc};
 use libp2p::PeerId;
 use tokio::sync::RwLock;
 use tracing::debug;

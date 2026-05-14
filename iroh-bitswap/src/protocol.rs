@@ -112,8 +112,8 @@ where
     fn upgrade_inbound(self, socket: TSocket, protocol_id: Self::Info) -> Self::Future {
         let mut length_codec = codec::UviBytes::default();
         length_codec.set_max_len(self.max_transmit_size);
-        let protocol = ProtocolId::try_from_str(protocol_id.as_ref())
-            .unwrap_or(ProtocolId::Bitswap120);
+        let protocol =
+            ProtocolId::try_from_str(protocol_id.as_ref()).unwrap_or(ProtocolId::Bitswap120);
         Box::pin(future::ok(Framed::new(
             socket,
             BitswapCodec::new(length_codec, protocol),
@@ -134,8 +134,8 @@ where
     fn upgrade_outbound(self, socket: TSocket, protocol_id: Self::Info) -> Self::Future {
         let mut length_codec = codec::UviBytes::default();
         length_codec.set_max_len(self.max_transmit_size);
-        let protocol = ProtocolId::try_from_str(protocol_id.as_ref())
-            .unwrap_or(ProtocolId::Bitswap120);
+        let protocol =
+            ProtocolId::try_from_str(protocol_id.as_ref()).unwrap_or(ProtocolId::Bitswap120);
         Box::pin(future::ok(Framed::new(
             socket,
             BitswapCodec::new(length_codec, protocol),

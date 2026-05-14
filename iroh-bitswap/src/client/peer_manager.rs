@@ -1,11 +1,11 @@
 use std::{fmt::Debug, sync::Arc};
 
+use crate::iroh_metrics::{bitswap::BitswapMetrics, core::MRecorder, inc};
 use ahash::{AHashMap, AHashSet};
 use anyhow::{Context, Result};
 use cid::Cid;
 use derivative::Derivative;
 use futures::{future::BoxFuture, FutureExt};
-use iroh_metrics::{bitswap::BitswapMetrics, core::MRecorder, inc};
 use libp2p::PeerId;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, error, trace, warn};

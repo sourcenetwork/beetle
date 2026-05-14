@@ -5,13 +5,13 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crate::iroh_metrics::{bitswap::BitswapMetrics, core::MRecorder, inc};
 use asynchronous_codec::Framed;
 use futures::StreamExt;
 use futures::{
     prelude::*,
     stream::{BoxStream, SelectAll},
 };
-use iroh_metrics::{bitswap::BitswapMetrics, core::MRecorder, inc};
 use libp2p::core::upgrade::NegotiationError;
 use libp2p::swarm::handler::{
     ConnectionEvent, DialUpgradeError, FullyNegotiatedInbound, FullyNegotiatedOutbound,
@@ -82,11 +82,8 @@ pub enum BitswapHandlerIn {
     Unprotect,
 }
 
-type BitswapConnectionHandlerEvent = ConnectionHandlerEvent<
-    ProtocolConfig,
-    (BitswapMessage, BitswapMessageResponse),
-    HandlerEvent,
->;
+type BitswapConnectionHandlerEvent =
+    ConnectionHandlerEvent<ProtocolConfig, (BitswapMessage, BitswapMessageResponse), HandlerEvent>;
 
 /// Protocol Handler that manages a single long-lived substream with a peer.
 pub struct BitswapHandler {
@@ -160,7 +157,10 @@ impl BitswapHandler {
 
     fn on_fully_negotiated_inbound(
         &mut self,
-        FullyNegotiatedInbound { protocol: substream, info: _ }: FullyNegotiatedInbound<
+        FullyNegotiatedInbound {
+            protocol: substream,
+            info: _,
+        }: FullyNegotiatedInbound<
             <Self as ConnectionHandler>::InboundProtocol,
             <Self as ConnectionHandler>::InboundOpenInfo,
         >,
@@ -177,7 +177,10 @@ impl BitswapHandler {
 
     fn on_fully_negotiated_outbound(
         &mut self,
-        FullyNegotiatedOutbound { protocol: substream, info: message }: FullyNegotiatedOutbound<
+        FullyNegotiatedOutbound {
+            protocol: substream,
+            info: message,
+        }: FullyNegotiatedOutbound<
             <Self as ConnectionHandler>::OutboundProtocol,
             <Self as ConnectionHandler>::OutboundOpenInfo,
         >,

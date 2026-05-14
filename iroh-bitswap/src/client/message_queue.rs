@@ -3,11 +3,11 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crate::iroh_metrics::core::MRecorder;
+use crate::iroh_metrics::{bitswap::BitswapMetrics, inc};
 use ahash::AHashSet;
 use anyhow::{ensure, Result};
 use cid::Cid;
-use iroh_metrics::core::MRecorder;
-use iroh_metrics::{bitswap::BitswapMetrics, inc};
 use libp2p::PeerId;
 use tokio::{sync::mpsc, task::JoinHandle};
 use tracing::{debug, error, warn};

@@ -1,9 +1,9 @@
 use std::{fmt::Debug, sync::Arc, time::Duration};
 
+use crate::iroh_metrics::{bitswap::BitswapMetrics, inc, record};
 use ahash::{AHashMap, AHashSet};
 use anyhow::{anyhow, Result};
 use cid::Cid;
-use iroh_metrics::{bitswap::BitswapMetrics, inc, record};
 use libp2p::PeerId;
 use tokio::{
     sync::{oneshot, Mutex, Notify, RwLock},
@@ -26,7 +26,7 @@ use super::{
     score_ledger::{DefaultScoreLedger, Receipt},
     task_merger::{TaskData, TaskMerger},
 };
-use iroh_metrics::core::MRecorder;
+use crate::iroh_metrics::core::MRecorder;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskInfo {
@@ -52,10 +52,7 @@ pub struct TaskInfo {
 // capturing closures as the concrete type (closures don't implement `Debug`
 // on stable). Config's `Debug` impl is now manual and skips the filter field.
 pub trait PeerBlockRequestFilter:
-    Fn(
-        &PeerId,
-        &Cid,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'static>>
+    Fn(&PeerId, &Cid) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'static>>
     + 'static
     + Sync
     + Send
@@ -66,8 +63,7 @@ impl<F> PeerBlockRequestFilter for F where
     F: Fn(
             &PeerId,
             &Cid,
-        )
-            -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'static>>
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'static>>
         + 'static
         + Sync
         + Send

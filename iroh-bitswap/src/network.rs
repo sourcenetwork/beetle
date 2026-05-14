@@ -6,11 +6,11 @@ use std::{
     time::Duration,
 };
 
+use crate::iroh_metrics::{bitswap::BitswapMetrics, inc};
+use crate::iroh_metrics::{core::MRecorder, record};
 use anyhow::{anyhow, bail, Context as _, Result};
 use cid::Cid;
 use futures::Stream;
-use iroh_metrics::{bitswap::BitswapMetrics, inc};
-use iroh_metrics::{core::MRecorder, record};
 use libp2p::swarm::ConnectionId;
 use libp2p::PeerId;
 use tokio::sync::{mpsc, oneshot};

@@ -2786,8 +2786,6 @@ dependencies = [
  "deadqueue",
  "derivative",
  "futures",
- "iroh-metrics",
- "iroh-util",
  "keyed_priority_queue",
  "libp2p",
  "multihash 0.18.1",

@@ -3,7 +3,10 @@ use std::fmt::{self, Debug};
 
 use ahash::AHashMap;
 use bytes::Bytes;
-use cid::Cid;
+use cid::{
+    multihash::{Code, MultihashDigest},
+    Cid,
+};
 use prost::Message;
 use tokio::time::Instant;
 use tracing::{trace, warn};
@@ -219,7 +222,7 @@ impl BitswapMessage {
     pub fn verify_blocks(&mut self) {
         self.blocks.retain(|_, block| {
             let now = Instant::now();
-            let is_valid = iroh_util::verify_hash(&block.cid, &block.data);
+            let is_valid = verify_hash(&block.cid, &block.data);
             trace!("block validated in {}ms", now.elapsed().as_millis());
             match is_valid {
                 Some(true) => {
@@ -425,6 +428,13 @@ impl BitswapMessage {
 
         message
     }
+}
+
+fn verify_hash(cid: &Cid, bytes: &[u8]) -> Option<bool> {
+    Code::try_from(cid.hash().code()).ok().map(|code| {
+        let calculated_hash = code.digest(bytes);
+        &calculated_hash == cid.hash()
+    })
 }
 
 impl TryFrom<pb::Message> for BitswapMessage {
