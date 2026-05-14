@@ -44,6 +44,7 @@ wasm-timer.workspace = true
 [dev-dependencies]
 criterion.workspace = true
 libp2p = { workspace = true, features = ["yamux", "noise", "tcp", "tokio"] }
+multistream-select = "0.13"
 tokio = { workspace = true, features = ["macros", "net", "rt"] }
 tokio-util = { workspace = true, features = ["compat"] }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }

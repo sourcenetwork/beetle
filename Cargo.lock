@@ -2789,6 +2789,7 @@ dependencies = [
  "keyed_priority_queue",
  "libp2p",
  "multihash 0.18.1",
+ "multistream-select",
  "names",
  "num_enum",
  "once_cell",
