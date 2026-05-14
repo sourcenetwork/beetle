@@ -1,12 +1,12 @@
 use std::sync::Arc;
 
+use crate::iroh_metrics::bitswap::BitswapMetrics;
+use crate::iroh_metrics::core::MRecorder;
+use crate::iroh_metrics::inc;
 use anyhow::{anyhow, Result};
 use cid::Cid;
 use futures::future::BoxFuture;
 use futures::FutureExt;
-use iroh_metrics::bitswap::BitswapMetrics;
-use iroh_metrics::core::MRecorder;
-use iroh_metrics::inc;
 use libp2p::PeerId;
 use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio::task::JoinHandle;

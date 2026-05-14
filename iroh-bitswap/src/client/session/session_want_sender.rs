@@ -1,10 +1,10 @@
 use std::cmp::Ordering;
 
+use crate::iroh_metrics::core::MRecorder;
+use crate::iroh_metrics::{bitswap::BitswapMetrics, inc};
 use ahash::{AHashMap, AHashSet};
 use anyhow::Result;
 use cid::Cid;
-use iroh_metrics::core::MRecorder;
-use iroh_metrics::{bitswap::BitswapMetrics, inc};
 use libp2p::PeerId;
 use tokio::{sync::oneshot, task::JoinHandle};
 use tracing::{debug, error, info, warn};

@@ -9,13 +9,12 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
+use crate::iroh_metrics::{bitswap::BitswapMetrics, core::MRecorder};
 use ahash::AHashMap;
 use anyhow::Result;
 use async_trait::async_trait;
 use cid::Cid;
 use handler::{BitswapHandler, HandlerEvent};
-use iroh_metrics::record;
-use iroh_metrics::{bitswap::BitswapMetrics, core::MRecorder, inc};
 use libp2p::swarm::dial_opts::DialOpts;
 use libp2p::swarm::{
     CloseConnection, ConnectionClosed, ConnectionDenied, ConnectionId, DialFailure, FromSwarm,
@@ -37,6 +36,7 @@ mod block;
 mod client;
 mod error;
 mod handler;
+mod iroh_metrics;
 mod network;
 mod prefix;
 mod protocol;
@@ -257,8 +257,10 @@ impl<S: Store> Bitswap<S> {
     /// Called on identify events from swarm, informing us about available protocols of this peer.
     pub fn on_identify(&self, peer: &PeerId, protocols: &[String]) {
         if let Some(PeerState::Connected(conn_id)) = self.get_peer_state(peer) {
-            let mut protocols: Vec<ProtocolId> =
-                protocols.iter().filter_map(|s| ProtocolId::try_from_str(s)).collect();
+            let mut protocols: Vec<ProtocolId> = protocols
+                .iter()
+                .filter_map(|s| ProtocolId::try_from_str(s))
+                .collect();
             protocols.sort();
             if let Some(best_protocol) = protocols.last() {
                 self.set_peer_state(peer, PeerState::Responsive(conn_id, *best_protocol));
@@ -446,11 +448,7 @@ impl<S: Store> NetworkBehaviour for Bitswap<S> {
                     self.set_peer_state(&peer_id, PeerState::Disconnected)
                 }
             }
-            FromSwarm::DialFailure(DialFailure {
-                peer_id,
-                error,
-                ..
-            }) => {
+            FromSwarm::DialFailure(DialFailure { peer_id, error, .. }) => {
                 if let Some(peer_id) = peer_id {
                     if matches!(error, libp2p::swarm::DialError::Denied { .. }) {
                         self.pause_dialing = true;
@@ -520,10 +518,7 @@ impl<S: Store> NetworkBehaviour for Bitswap<S> {
         }
     }
 
-    fn poll(
-        &mut self,
-        cx: &mut Context,
-    ) -> Poll<ToSwarm<Self::ToSwarm, THandlerInEvent<Self>>> {
+    fn poll(&mut self, cx: &mut Context) -> Poll<ToSwarm<Self::ToSwarm, THandlerInEvent<Self>>> {
         inc!(BitswapMetrics::NetworkBehaviourActionPollTick);
         // limit work
         for _ in 0..50 {
@@ -592,9 +587,7 @@ impl<S: Store> NetworkBehaviour for Bitswap<S> {
                             }
                         }
                     }
-                    OutEvent::GenerateEvent(ev) => {
-                        return Poll::Ready(ToSwarm::GenerateEvent(ev))
-                    }
+                    OutEvent::GenerateEvent(ev) => return Poll::Ready(ToSwarm::GenerateEvent(ev)),
                     OutEvent::SendMessage {
                         peer,
                         message,

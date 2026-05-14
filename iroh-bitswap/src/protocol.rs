@@ -112,8 +112,8 @@ where
     fn upgrade_inbound(self, socket: TSocket, protocol_id: Self::Info) -> Self::Future {
         let mut length_codec = codec::UviBytes::default();
         length_codec.set_max_len(self.max_transmit_size);
-        let protocol = ProtocolId::try_from_str(protocol_id.as_ref())
-            .unwrap_or(ProtocolId::Bitswap120);
+        let protocol =
+            ProtocolId::try_from_str(protocol_id.as_ref()).unwrap_or(ProtocolId::Bitswap120);
         Box::pin(future::ok(Framed::new(
             socket,
             BitswapCodec::new(length_codec, protocol),
@@ -134,8 +134,8 @@ where
     fn upgrade_outbound(self, socket: TSocket, protocol_id: Self::Info) -> Self::Future {
         let mut length_codec = codec::UviBytes::default();
         length_codec.set_max_len(self.max_transmit_size);
-        let protocol = ProtocolId::try_from_str(protocol_id.as_ref())
-            .unwrap_or(ProtocolId::Bitswap120);
+        let protocol =
+            ProtocolId::try_from_str(protocol_id.as_ref()).unwrap_or(ProtocolId::Bitswap120);
         Box::pin(future::ok(Framed::new(
             socket,
             BitswapCodec::new(length_codec, protocol),
@@ -214,7 +214,8 @@ impl Decoder for BitswapCodec {
 #[cfg(test)]
 mod tests {
     use futures::prelude::*;
-    use libp2p::core::upgrade;
+    use libp2p::core::{InboundUpgrade, OutboundUpgrade, UpgradeInfo};
+    use multistream_select::{dialer_select_proto, listener_select_proto, Version};
     use tokio::net::{TcpListener, TcpStream};
     use tokio_util::compat::*;
 
@@ -227,23 +228,27 @@ mod tests {
 
         let server = async move {
             let (incoming, _) = listener.accept().await.unwrap();
-            upgrade::apply_inbound(incoming.compat(), ProtocolConfig::default())
-                .await
-                .unwrap();
+            let upgrade = ProtocolConfig::default();
+            let (protocol, stream) =
+                listener_select_proto(incoming.compat(), upgrade.protocol_info())
+                    .await
+                    .unwrap();
+            let framed = upgrade.upgrade_inbound(stream, protocol).await.unwrap();
+            assert_eq!(framed.codec().protocol, ProtocolId::Bitswap120);
         };
 
         let client = async move {
             let stream = TcpStream::connect(&listener_addr).await.unwrap();
-            upgrade::apply_outbound(
-                stream.compat(),
-                ProtocolConfig::default(),
-                upgrade::Version::V1Lazy,
-            )
-            .await
-            .unwrap();
+            let upgrade = ProtocolConfig::default();
+            let (protocol, stream) =
+                dialer_select_proto(stream.compat(), upgrade.protocol_info(), Version::V1Lazy)
+                    .await
+                    .unwrap();
+            let framed = upgrade.upgrade_outbound(stream, protocol).await.unwrap();
+            assert_eq!(framed.codec().protocol, ProtocolId::Bitswap120);
         };
 
-        future::select(Box::pin(server), Box::pin(client)).await;
+        future::join(server, client).await;
     }
 
     #[test]
