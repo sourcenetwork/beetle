@@ -12,6 +12,8 @@ pub enum Error {
     Cid(#[from] cid::Error),
     #[error("Error while parsing multihash: {0}")]
     Multihash(#[from] multihash::Error),
+    #[error("Unsupported multihash code {0}")]
+    UnsupportedMultihashCode(u64),
     #[error("Invalid block presence type {0}")]
     InvalidBlockPresenceType(#[from] num_enum::TryFromPrimitiveError<BlockPresenceType>),
     #[error("Invalid want type {0}")]
