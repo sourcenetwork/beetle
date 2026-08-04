@@ -4,9 +4,9 @@ use std::fmt::{self, Debug};
 use ahash::AHashMap;
 use bytes::Bytes;
 use cid::{
-    multihash::{Code, MultihashDigest},
     Cid,
 };
+use multihash_codetable::{Code, MultihashDigest};
 use prost::Message;
 use tokio::time::Instant;
 use tracing::{trace, warn};

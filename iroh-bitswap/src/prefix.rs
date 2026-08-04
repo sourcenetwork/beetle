@@ -1,7 +1,7 @@
 use std::convert::TryFrom;
 
 use cid::{self, Cid, Version};
-use multihash::{Code, MultihashDigest};
+use multihash_codetable::{Code, MultihashDigest};
 use unsigned_varint::{decode as varint_decode, encode as varint_encode};
 
 use crate::error::Error;
@@ -31,7 +31,8 @@ impl Prefix {
         Ok(Prefix {
             version,
             codec,
-            mh_type: Code::try_from(mh_type)?,
+            mh_type: Code::try_from(mh_type)
+                .map_err(|e| Error::UnsupportedMultihashCode(e.0))?,
             mh_len,
         })
     }

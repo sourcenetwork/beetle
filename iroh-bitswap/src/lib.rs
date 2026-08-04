@@ -422,6 +422,7 @@ impl<S: Store> NetworkBehaviour for Bitswap<S> {
         _peer: PeerId,
         _addr: &Multiaddr,
         _role_override: libp2p::core::Endpoint,
+        _port_use: libp2p::core::transport::PortUse,
     ) -> Result<THandler<Self>, ConnectionDenied> {
         Ok(self.new_handler())
     }
