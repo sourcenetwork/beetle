@@ -61,10 +61,6 @@ pub enum HandlerEvent {
         message: BitswapMessage,
         protocol: ProtocolId,
     },
-    Connected {
-        protocol: ProtocolId,
-    },
-    ProtocolNotSuppported,
     FailedToSendMessage {
         error: BitswapHandlerError,
     },
