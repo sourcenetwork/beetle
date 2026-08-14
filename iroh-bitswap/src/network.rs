@@ -11,7 +11,6 @@ use crate::iroh_metrics::{core::MRecorder, record};
 use anyhow::{anyhow, bail, Context as _, Result};
 use cid::Cid;
 use futures::Stream;
-use libp2p::swarm::ConnectionId;
 use libp2p::PeerId;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, error, info, trace};
@@ -37,7 +36,7 @@ pub struct Network {
 pub enum OutEvent {
     Dial {
         peer: PeerId,
-        response: oneshot::Sender<std::result::Result<(ConnectionId, Option<ProtocolId>), String>>,
+        response: oneshot::Sender<std::result::Result<Option<ProtocolId>, String>>,
         id: usize,
     },
     Disconnect(PeerId, oneshot::Sender<()>),
@@ -45,7 +44,6 @@ pub enum OutEvent {
         peer: PeerId,
         message: BitswapMessage,
         response: oneshot::Sender<std::result::Result<(), SendError>>,
-        connection_id: ConnectionId,
     },
     GenerateEvent(BitswapEvent),
     ProtectPeer {
@@ -106,7 +104,6 @@ impl Network {
     pub async fn send_message_with_retry_and_timeout(
         &self,
         peer: PeerId,
-        connection_id: ConnectionId,
         message: BitswapMessage,
         retries: usize,
         timeout: Duration,
@@ -132,7 +129,6 @@ impl Network {
                         peer,
                         message: message.clone(),
                         response: s,
-                        connection_id,
                     })
                     .await
                     .map_err(|e| anyhow!("send:{}: channel send failed: {:?}", peer, e))?;
@@ -202,11 +198,7 @@ impl Network {
         Ok(r)
     }
 
-    pub async fn dial(
-        &self,
-        peer: PeerId,
-        timeout: Duration,
-    ) -> Result<(ConnectionId, Option<ProtocolId>)> {
+    pub async fn dial(&self, peer: PeerId, timeout: Duration) -> Result<Option<ProtocolId>> {
         let dial_id = self
             .dial_id
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -243,23 +235,21 @@ impl Network {
         to: PeerId,
         config: MessageSenderConfig,
     ) -> Result<MessageSender> {
-        let (connection_id, protocol_id) = self.dial(to, CONNECT_TIMEOUT).await?;
+        let protocol_id = self.dial(to, CONNECT_TIMEOUT).await?;
 
         Ok(MessageSender {
             to,
             config,
             network: self.clone(),
-            connection_id,
             protocol_id,
         })
     }
 
     pub async fn send_message(&self, peer: PeerId, message: BitswapMessage) -> Result<()> {
-        let (connection_id, _) = self.dial(peer, CONNECT_TIMEOUT).await?;
+        self.dial(peer, CONNECT_TIMEOUT).await?;
         let timeout = send_timeout(message.encoded_len());
         self.send_message_with_retry_and_timeout(
             peer,
-            connection_id,
             message,
             1,
             timeout,
@@ -359,7 +349,6 @@ pub struct MessageSender {
     to: PeerId,
     network: Network,
     config: MessageSenderConfig,
-    connection_id: ConnectionId,
     protocol_id: Option<ProtocolId>,
 }
 
@@ -372,7 +361,6 @@ impl MessageSender {
         self.network
             .send_message_with_retry_and_timeout(
                 self.to,
-                self.connection_id,
                 message,
                 self.config.max_retries,
                 self.config.send_timeout,

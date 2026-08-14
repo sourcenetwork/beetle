@@ -55,7 +55,7 @@ type DialMap = AHashMap<
     PeerId,
     Vec<(
         usize,
-        oneshot::Sender<std::result::Result<(ConnectionId, Option<ProtocolId>), String>>,
+        oneshot::Sender<std::result::Result<Option<ProtocolId>, String>>,
     )>,
 >;
 
@@ -65,6 +65,11 @@ pub struct Bitswap<S: Store> {
     protocol_config: ProtocolConfig,
     idle_timeout: Duration,
     peers: Arc<Mutex<AHashMap<PeerId, PeerState>>>,
+    /// Every live connection per peer, tracked from the swarm's own
+    /// established/closed events. `peers` records one connection and one
+    /// protocol; this records reachability, which is what deciding whether to
+    /// dial and whether a peer is still usable actually depends on.
+    connections: Arc<Mutex<AHashMap<PeerId, HashSet<ConnectionId>>>>,
     dials: Arc<Mutex<DialMap>>,
     /// Set to true when dialing should be disabled because we have reached the conn limit.
     pause_dialing: bool,
@@ -80,7 +85,6 @@ pub struct Bitswap<S: Store> {
 enum PeerState {
     Connected(ConnectionId),
     Responsive(ConnectionId, ProtocolId),
-    Unresponsive,
     Disconnected,
     DialFailure(Instant),
 }
@@ -215,6 +219,7 @@ impl<S: Store> Bitswap<S> {
             protocol_config: config.protocol,
             idle_timeout: config.idle_timeout,
             peers: Default::default(),
+            connections: Default::default(),
             dials: Default::default(),
             pause_dialing: false,
             server,
@@ -314,6 +319,53 @@ impl<S: Store> Bitswap<S> {
         self.peers.lock().unwrap().get(peer).copied()
     }
 
+    /// Whether the swarm still holds a connection to `peer`.
+    fn is_connected(&self, peer: &PeerId) -> bool {
+        self.connections
+            .lock()
+            .unwrap()
+            .get(peer)
+            .map(|conns| !conns.is_empty())
+            .unwrap_or(false)
+    }
+
+    /// Hands every waiter on `peer` the outcome of a dial that will not produce
+    /// a `ConnectionEstablished` of its own.
+    fn resolve_dials(
+        &self,
+        peer: &PeerId,
+        outcome: std::result::Result<Option<ProtocolId>, String>,
+    ) {
+        let dials = &mut *self.dials.lock().unwrap();
+        if let Some(mut dials) = dials.remove(peer) {
+            while let Some((id, sender)) = dials.pop() {
+                if let Err(err) = sender.send(outcome.clone()) {
+                    debug!("dial:{}: failed to send dial response {:?}", id, err)
+                }
+            }
+        }
+    }
+
+    /// Points a known peer's record at `connection` without changing whether it
+    /// counts as connected or responsive.
+    fn refresh_recorded_connection(&self, peer: &PeerId, connection: ConnectionId) {
+        let peers = &mut *self.peers.lock().unwrap();
+        if let Some(state) = peers.get_mut(peer) {
+            *state = match *state {
+                PeerState::Responsive(_, protocol) => PeerState::Responsive(connection, protocol),
+                _ => PeerState::Connected(connection),
+            };
+        }
+    }
+
+    /// The protocol negotiated with `peer`, if one is known.
+    fn negotiated_protocol(&self, peer: &PeerId) -> Option<ProtocolId> {
+        match self.get_peer_state(peer) {
+            Some(PeerState::Responsive(_, protocol)) => Some(protocol),
+            _ => None,
+        }
+    }
+
     fn set_peer_state(&self, peer: &PeerId, new_state: PeerState) {
         let peers = &mut *self.peers.lock().unwrap();
         let peer = *peer;
@@ -324,26 +376,16 @@ impl<S: Store> Bitswap<S> {
                 if old_state == new_state {
                     return;
                 }
-                if let PeerState::Connected(old_id) = old_state {
-                    if let PeerState::Connected(new_id) = new_state {
-                        // TODO: better understand what this means and how to handle it.
-                        debug!(
-                            "Peer {}: detected connection id change: {:?} => {:?}",
-                            peer, old_id, new_id
-                        );
-                        return;
-                    }
-                }
-
+                // Additional connections go through `refresh_recorded_connection`
+                // so they neither strand the peer on the first id nor demote one
+                // already known to be responsive.
                 if new_state == PeerState::Disconnected {
                     entry.remove();
                 } else {
                     *entry.get_mut() = new_state;
                 }
                 match new_state {
-                    PeerState::DialFailure(_)
-                    | PeerState::Disconnected
-                    | PeerState::Unresponsive => {
+                    PeerState::DialFailure(_) | PeerState::Disconnected => {
                         if old_state.is_connected() {
                             inc!(BitswapMetrics::DisconnectedPeers);
                             self.peer_disconnected(peer);
@@ -364,9 +406,7 @@ impl<S: Store> Bitswap<S> {
                     entry.insert(new_state);
                 }
                 match new_state {
-                    PeerState::DialFailure(_)
-                    | PeerState::Disconnected
-                    | PeerState::Unresponsive => {
+                    PeerState::DialFailure(_) | PeerState::Disconnected => {
                         inc!(BitswapMetrics::DisconnectedPeers);
                         self.peer_disconnected(peer);
                     }
@@ -435,35 +475,93 @@ impl<S: Store> NetworkBehaviour for Bitswap<S> {
                     info.peer_id,
                     info.other_established
                 );
-                self.set_peer_state(&info.peer_id, PeerState::Connected(info.connection_id));
+                self.connections
+                    .lock()
+                    .unwrap()
+                    .entry(info.peer_id)
+                    .or_default()
+                    .insert(info.connection_id);
+                if info.other_established == 0 {
+                    self.set_peer_state(&info.peer_id, PeerState::Connected(info.connection_id));
+                } else {
+                    // An additional connection refreshes the recorded id without
+                    // re-announcing a peer that is already counted as connected.
+                    self.refresh_recorded_connection(&info.peer_id, info.connection_id);
+                }
                 self.pause_dialing = false;
+
+                // A dial is satisfied the moment the peer is reachable. Waiting
+                // for the handler's `Connected` event instead left every dial
+                // pending until a bitswap substream negotiated — and nothing in
+                // this crate ever emits that event, so no dial ever resolved on
+                // success at all.
+                self.resolve_dials(&info.peer_id, Ok(self.negotiated_protocol(&info.peer_id)));
             }
             FromSwarm::ConnectionClosed(ConnectionClosed {
                 peer_id,
+                connection_id,
                 remaining_established,
                 ..
             }) => {
                 self.pause_dialing = false;
+                {
+                    let connections = &mut *self.connections.lock().unwrap();
+                    if let Some(conns) = connections.get_mut(&peer_id) {
+                        conns.remove(&connection_id);
+                        if conns.is_empty() {
+                            connections.remove(&peer_id);
+                        }
+                    }
+                }
                 if remaining_established == 0 {
                     // Last connection, close it
                     self.set_peer_state(&peer_id, PeerState::Disconnected)
                 }
+                // While other connections remain the peer stays connected. The
+                // recorded id may now name a closed connection, which is why
+                // messages are dispatched to any live connection rather than to
+                // that id.
             }
             FromSwarm::DialFailure(DialFailure { peer_id, error, .. }) => {
                 if let Some(peer_id) = peer_id {
+                    // A dial outcome says nothing about connections that already
+                    // exist. Tearing the peer down here used to leave bitswap's
+                    // view disagreeing with the swarm's, and because the refused
+                    // dial is what would have repaired it, that disagreement was
+                    // permanent.
+                    let connected = self.is_connected(&peer_id);
                     if matches!(error, libp2p::swarm::DialError::Denied { .. }) {
                         self.pause_dialing = true;
-                        self.set_peer_state(&peer_id, PeerState::Disconnected);
-                    } else {
+                        if !connected {
+                            self.set_peer_state(&peer_id, PeerState::Disconnected);
+                        }
+                    } else if !matches!(
+                        error,
+                        libp2p::swarm::DialError::DialPeerConditionFalse { .. }
+                    ) && !connected
+                    {
                         self.set_peer_state(&peer_id, PeerState::DialFailure(Instant::now()));
                     }
 
                     trace!("dial_failure {}, {:?}", peer_id, error);
-                    let dials = &mut self.dials.lock().unwrap();
-                    if let Some(mut dials) = dials.remove(&peer_id) {
-                        while let Some((_id, sender)) = dials.pop() {
-                            let _ = sender.send(Err(error.to_string()));
-                        }
+                    if connected {
+                        // The peer is reachable regardless of what this dial did.
+                        self.resolve_dials(&peer_id, Ok(self.negotiated_protocol(&peer_id)));
+                    } else if matches!(
+                        error,
+                        libp2p::swarm::DialError::DialPeerConditionFalse { .. }
+                    ) {
+                        // A dial is already in flight — its own
+                        // `ConnectionEstablished` will resolve these waiters.
+                        // Failing them here would also fail the caller that
+                        // started that dial, and any behaviour's refused dial
+                        // lands in this arm because `FromSwarm` is broadcast.
+                        trace!(
+                            "dial to {} already in flight, waiters left pending",
+                            peer_id
+                        );
+                    } else {
+                        self.resolve_dials(&peer_id, Err(error.to_string()));
                     }
                 }
             }
@@ -478,31 +576,6 @@ impl<S: Store> NetworkBehaviour for Bitswap<S> {
         event: THandlerOutEvent<Self>,
     ) {
         match event {
-            HandlerEvent::Connected { protocol } => {
-                self.set_peer_state(&peer_id, PeerState::Responsive(connection, protocol));
-                {
-                    let dials = &mut *self.dials.lock().unwrap();
-                    if let Some(mut dials) = dials.remove(&peer_id) {
-                        while let Some((id, sender)) = dials.pop() {
-                            if let Err(err) = sender.send(Ok((connection, Some(protocol)))) {
-                                warn!("dial:{}: failed to send dial response {:?}", id, err)
-                            }
-                        }
-                    }
-                }
-            }
-            HandlerEvent::ProtocolNotSuppported => {
-                self.set_peer_state(&peer_id, PeerState::Unresponsive);
-
-                let dials = &mut *self.dials.lock().unwrap();
-                if let Some(mut dials) = dials.remove(&peer_id) {
-                    while let Some((id, sender)) = dials.pop() {
-                        if let Err(err) = sender.send(Err("protocol not supported".into())) {
-                            warn!("dial:{} failed to send dial response {:?}", id, err)
-                        }
-                    }
-                }
-            }
             HandlerEvent::Message {
                 mut message,
                 protocol,
@@ -537,16 +610,16 @@ impl<S: Store> NetworkBehaviour for Bitswap<S> {
                     }
                     OutEvent::Dial { peer, response, id } => {
                         match self.get_peer_state(&peer) {
-                            Some(PeerState::Responsive(conn, protocol_id)) => {
+                            Some(PeerState::Responsive(_, protocol_id)) => {
                                 // already connected
-                                if let Err(err) = response.send(Ok((conn, Some(protocol_id)))) {
+                                if let Err(err) = response.send(Ok(Some(protocol_id))) {
                                     debug!("dial:{}: failed to send dial response {:?}", id, err)
                                 }
                                 continue;
                             }
-                            Some(PeerState::Connected(conn)) => {
+                            Some(PeerState::Connected(_)) => {
                                 // already connected
-                                if let Err(err) = response.send(Ok((conn, None))) {
+                                if let Err(err) = response.send(Ok(None)) {
                                     debug!("dial:{}: failed to send dial response {:?}", id, err)
                                 }
                                 continue;
@@ -555,6 +628,7 @@ impl<S: Store> NetworkBehaviour for Bitswap<S> {
                                 if dialed.elapsed() < DIAL_BACK_OFF =>
                             {
                                 // Do not bother trying to dial these for now.
+                                debug!("dial:{id}: {peer} is in dial back-off");
                                 if let Err(err) =
                                     response.send(Err(format!("dial:{id}: undialable peer")))
                                 {
@@ -564,7 +638,7 @@ impl<S: Store> NetworkBehaviour for Bitswap<S> {
                             }
                             _ => {
                                 if self.pause_dialing {
-                                    // already connected
+                                    debug!("dial:{id}: dialing paused, cannot reach {peer}");
                                     if let Err(err) =
                                         response.send(Err(format!("dial:{id}: dialing paused")))
                                     {
@@ -580,9 +654,17 @@ impl<S: Store> NetworkBehaviour for Bitswap<S> {
                                     .or_default()
                                     .push((id, response));
 
+                                // Only dial a peer we are not already talking to.
+                                // `Always` opened a second connection to a peer
+                                // that was already reachable, which peers running
+                                // a single-stream pubsub cannot tolerate, and any
+                                // redundant dial that failed put this peer into a
+                                // ten-minute back-off.
                                 return Poll::Ready(ToSwarm::Dial {
                                     opts: DialOpts::peer_id(peer)
-                                        .condition(libp2p::swarm::dial_opts::PeerCondition::Always)
+                                        .condition(
+                                            libp2p::swarm::dial_opts::PeerCondition::DisconnectedAndNotDialing,
+                                        )
                                         .build(),
                                 });
                             }
@@ -593,32 +675,39 @@ impl<S: Store> NetworkBehaviour for Bitswap<S> {
                         peer,
                         message,
                         response,
-                        connection_id,
                     } => {
                         tracing::debug!("send message {}", peer);
                         return Poll::Ready(ToSwarm::NotifyHandler {
                             peer_id: peer,
-                            handler: NotifyHandler::One(connection_id),
+                            handler: NotifyHandler::Any,
                             event: handler::BitswapHandlerIn::Message(message, response),
                         });
                     }
                     OutEvent::ProtectPeer { peer } => {
-                        if let Some(PeerState::Responsive(conn_id, _)) = self.get_peer_state(&peer)
-                        {
+                        // Keep-alive is per connection, but the recorded id is
+                        // the same one that can name a closed connection, and
+                        // protecting that leaves the connection actually
+                        // carrying bitswap free to be reaped as idle.
+                        if matches!(
+                            self.get_peer_state(&peer),
+                            Some(PeerState::Responsive(_, _))
+                        ) {
                             return Poll::Ready(ToSwarm::NotifyHandler {
                                 peer_id: peer,
-                                handler: NotifyHandler::One(conn_id),
+                                handler: NotifyHandler::Any,
                                 event: handler::BitswapHandlerIn::Protect,
                             });
                         }
                     }
                     OutEvent::UnprotectPeer { peer, response } => {
-                        if let Some(PeerState::Responsive(conn_id, _)) = self.get_peer_state(&peer)
-                        {
+                        if matches!(
+                            self.get_peer_state(&peer),
+                            Some(PeerState::Responsive(_, _))
+                        ) {
                             let _ = response.send(true);
                             return Poll::Ready(ToSwarm::NotifyHandler {
                                 peer_id: peer,
-                                handler: NotifyHandler::One(conn_id),
+                                handler: NotifyHandler::Any,
                                 event: handler::BitswapHandlerIn::Unprotect,
                             });
                         }
@@ -643,8 +732,10 @@ mod tests {
     use libp2p::core::muxing::StreamMuxerBox;
     use libp2p::core::transport::upgrade::Version;
     use libp2p::core::transport::Boxed;
+    use libp2p::core::ConnectedPoint;
     use libp2p::identity::Keypair;
     use libp2p::noise;
+    use libp2p::swarm::behaviour::ConnectionEstablished;
     use libp2p::swarm::SwarmEvent;
     use libp2p::tcp::{tokio::Transport as TcpTransport, Config as TcpConfig};
     use libp2p::yamux::Config as YamuxConfig;
@@ -768,6 +859,324 @@ mod tests {
     #[tokio::test]
     async fn test_get_1024_block() {
         get_block::<1024>().await;
+    }
+
+    /// The same refusal, observed rather than constructed: a real `Swarm::dial`
+    /// under `DisconnectedAndNotDialing` against a peer already connected. The
+    /// peer must survive it and still serve blocks, which is what breaks when a
+    /// refusal is treated as the peer going away.
+    #[tokio::test]
+    async fn test_get_block_after_a_refused_redial() {
+        let (peer1_id, trans) = mk_transport();
+        let store1 = TestStore::default();
+        let bs1 = Bitswap::new(peer1_id, store1.clone(), Config::default()).await;
+        let mut swarm1 = Swarm::new(
+            trans,
+            bs1,
+            peer1_id,
+            libp2p::swarm::Config::with_tokio_executor(),
+        );
+        let block = create_random_block_v1();
+        store1
+            .store
+            .write()
+            .await
+            .insert(*block.cid(), block.clone());
+
+        let (tx, mut rx) = mpsc::channel::<Multiaddr>(1);
+        Swarm::listen_on(&mut swarm1, "/ip4/127.0.0.1/tcp/0".parse().unwrap()).unwrap();
+        let peer1 = tokio::task::spawn(async move {
+            while swarm1.next().now_or_never().is_some() {}
+            let listeners: Vec<_> = Swarm::listeners(&swarm1).collect();
+            for l in listeners {
+                tx.send(l.clone()).await.unwrap();
+            }
+            loop {
+                let ev = swarm1.next().await;
+                trace!("peer1: {:?}", ev);
+            }
+        });
+
+        let (peer2_id, trans) = mk_transport();
+        let bs2 = Bitswap::new(peer2_id, TestStore::default(), Config::default()).await;
+        let mut swarm2 = Swarm::new(
+            trans,
+            bs2,
+            peer2_id,
+            libp2p::swarm::Config::with_tokio_executor(),
+        );
+        let swarm2_bs = swarm2.behaviour().clone();
+
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let peer2 = tokio::task::spawn(async move {
+            let addr = rx.recv().await.unwrap();
+            Swarm::dial(&mut swarm2, addr).unwrap();
+
+            let mut ready_tx = Some(ready_tx);
+            loop {
+                match swarm2.next().await {
+                    Some(SwarmEvent::ConnectionEstablished { peer_id, .. }) => {
+                        swarm2.behaviour().on_identify(
+                            &peer_id,
+                            &[
+                                "/ipfs/bitswap/1.2.0".to_string(),
+                                "/ipfs/bitswap/1.1.0".to_string(),
+                            ],
+                        );
+                        // The swarm refuses this and reports it to every
+                        // behaviour as a `DialFailure` before it returns.
+                        let refused = Swarm::dial(
+                            &mut swarm2,
+                            DialOpts::peer_id(peer_id)
+                                .condition(
+                                    libp2p::swarm::dial_opts::PeerCondition::DisconnectedAndNotDialing,
+                                )
+                                .build(),
+                        );
+                        assert!(
+                            matches!(
+                                refused,
+                                Err(libp2p::swarm::DialError::DialPeerConditionFalse(_))
+                            ),
+                            "expected the redial to be refused, got {refused:?}"
+                        );
+                        if let Some(tx) = ready_tx.take() {
+                            let _ = tx.send(());
+                        }
+                    }
+                    ev => trace!("peer2: {:?}", ev),
+                }
+            }
+        });
+
+        tokio::time::timeout(Duration::from_secs(30), ready_rx)
+            .await
+            .expect("peer2 never connected")
+            .unwrap();
+
+        let received = tokio::time::timeout(
+            Duration::from_secs(30),
+            swarm2_bs.client().get_block(block.cid()),
+        )
+        .await
+        .expect("fetch never completed: a refused redial took the peer down")
+        .unwrap();
+        assert_eq!(block, received);
+
+        peer1.abort();
+        peer2.abort();
+    }
+
+    /// A dial refused because a connection already exists must not fail the
+    /// waiters of the dial that is still in flight. The refusal is delivered
+    /// synchronously by `Swarm::dial`, and any behaviour's refused dial reaches
+    /// bitswap because `FromSwarm` is broadcast, so failing waiters here breaks
+    /// callers that never asked for the refused dial.
+    #[tokio::test]
+    async fn refused_dial_leaves_in_flight_waiters_pending() {
+        let (self_id, _) = mk_transport();
+        let bs = Bitswap::new(self_id, TestStore::default(), Config::default()).await;
+        let peer = PeerId::random();
+
+        let (first_tx, mut first_rx) = oneshot::channel();
+        let (second_tx, mut second_rx) = oneshot::channel();
+        bs.dials
+            .lock()
+            .unwrap()
+            .insert(peer, vec![(1, first_tx), (2, second_tx)]);
+
+        let mut bs = bs;
+        let error = libp2p::swarm::DialError::DialPeerConditionFalse(
+            libp2p::swarm::dial_opts::PeerCondition::DisconnectedAndNotDialing,
+        );
+        bs.on_swarm_event(FromSwarm::DialFailure(DialFailure {
+            peer_id: Some(peer),
+            error: &error,
+            connection_id: ConnectionId::new_unchecked(1),
+        }));
+
+        assert!(
+            matches!(
+                first_rx.try_recv(),
+                Err(oneshot::error::TryRecvError::Empty)
+            ),
+            "the in-flight dial's own waiter was resolved by an unrelated refusal"
+        );
+        assert!(matches!(
+            second_rx.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+
+        // The dial that was actually in flight now lands, and resolves both.
+        let endpoint = ConnectedPoint::Dialer {
+            address: "/ip4/127.0.0.1/tcp/1".parse().unwrap(),
+            role_override: libp2p::core::Endpoint::Dialer,
+            port_use: libp2p::core::transport::PortUse::New,
+        };
+        bs.on_swarm_event(FromSwarm::ConnectionEstablished(ConnectionEstablished {
+            peer_id: peer,
+            connection_id: ConnectionId::new_unchecked(1),
+            endpoint: &endpoint,
+            failed_addresses: &[],
+            other_established: 0,
+        }));
+
+        assert!(first_rx.try_recv().unwrap().is_ok());
+        assert!(second_rx.try_recv().unwrap().is_ok());
+    }
+
+    /// A denied dial says nothing about connections that already exist. Dropping
+    /// the peer here left bitswap's view disagreeing with the swarm's, and since
+    /// the refused dial is what would have repaired it, the peer stayed
+    /// unreachable for good.
+    #[tokio::test]
+    async fn denied_dial_keeps_a_peer_that_is_still_connected() {
+        let (self_id, _) = mk_transport();
+        let bs = Bitswap::new(self_id, TestStore::default(), Config::default()).await;
+        let peer = PeerId::random();
+        let mut bs = bs;
+
+        let endpoint = ConnectedPoint::Dialer {
+            address: "/ip4/127.0.0.1/tcp/1".parse().unwrap(),
+            role_override: libp2p::core::Endpoint::Dialer,
+            port_use: libp2p::core::transport::PortUse::New,
+        };
+        bs.on_swarm_event(FromSwarm::ConnectionEstablished(ConnectionEstablished {
+            peer_id: peer,
+            connection_id: ConnectionId::new_unchecked(1),
+            endpoint: &endpoint,
+            failed_addresses: &[],
+            other_established: 0,
+        }));
+        assert!(bs.get_peer_state(&peer).is_some());
+
+        let error = libp2p::swarm::DialError::Denied {
+            cause: libp2p::swarm::ConnectionDenied::new(Error::new(ErrorKind::Other, "limit")),
+        };
+        bs.on_swarm_event(FromSwarm::DialFailure(DialFailure {
+            peer_id: Some(peer),
+            error: &error,
+            connection_id: ConnectionId::new_unchecked(2),
+        }));
+
+        assert!(
+            bs.is_connected(&peer),
+            "a denied extra dial dropped a peer that is still connected"
+        );
+        assert!(
+            bs.get_peer_state(&peer).is_some(),
+            "peer state was cleared while a connection remains, and nothing repairs it"
+        );
+
+        // A later dial resolves from the surviving connection rather than being
+        // refused forever.
+        let (tx, mut rx) = oneshot::channel();
+        bs.dials.lock().unwrap().insert(peer, vec![(3, tx)]);
+        bs.resolve_dials(&peer, Ok(bs.negotiated_protocol(&peer)));
+        assert!(rx.try_recv().unwrap().is_ok());
+    }
+
+    /// Two connections to one peer, then the connection bitswap most recently
+    /// recorded closes while the other stays up. The peer is still reachable, so
+    /// the fetch must still complete. Addressing messages to the recorded
+    /// connection id instead dropped every one of them, and the peer never
+    /// recovered because a surviving connection raises no swarm event.
+    #[tokio::test]
+    async fn test_get_block_after_recorded_connection_closes() {
+        let (peer1_id, trans) = mk_transport();
+        let store1 = TestStore::default();
+        let bs1 = Bitswap::new(peer1_id, store1.clone(), Config::default()).await;
+        let mut swarm1 = Swarm::new(
+            trans,
+            bs1,
+            peer1_id,
+            libp2p::swarm::Config::with_tokio_executor(),
+        );
+        let block = create_random_block_v1();
+        store1
+            .store
+            .write()
+            .await
+            .insert(*block.cid(), block.clone());
+
+        let (tx, mut rx) = mpsc::channel::<Multiaddr>(1);
+        Swarm::listen_on(&mut swarm1, "/ip4/127.0.0.1/tcp/0".parse().unwrap()).unwrap();
+        let peer1 = tokio::task::spawn(async move {
+            while swarm1.next().now_or_never().is_some() {}
+            let listeners: Vec<_> = Swarm::listeners(&swarm1).collect();
+            for l in listeners {
+                tx.send(l.clone()).await.unwrap();
+            }
+            loop {
+                let ev = swarm1.next().await;
+                trace!("peer1: {:?}", ev);
+            }
+        });
+
+        let (peer2_id, trans) = mk_transport();
+        let store2 = TestStore::default();
+        let bs2 = Bitswap::new(peer2_id, store2.clone(), Config::default()).await;
+        let mut swarm2 = Swarm::new(
+            trans,
+            bs2,
+            peer2_id,
+            libp2p::swarm::Config::with_tokio_executor(),
+        );
+        let swarm2_bs = swarm2.behaviour().clone();
+
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let peer2 = tokio::task::spawn(async move {
+            let addr = rx.recv().await.unwrap();
+            Swarm::dial(&mut swarm2, addr.clone()).unwrap();
+            Swarm::dial(&mut swarm2, addr).unwrap();
+
+            let mut established = Vec::new();
+            let mut ready_tx = Some(ready_tx);
+            loop {
+                match swarm2.next().await {
+                    Some(SwarmEvent::ConnectionEstablished {
+                        peer_id,
+                        connection_id,
+                        ..
+                    }) => {
+                        swarm2.behaviour().on_identify(
+                            &peer_id,
+                            &[
+                                "/ipfs/bitswap/1.2.0".to_string(),
+                                "/ipfs/bitswap/1.1.0".to_string(),
+                            ],
+                        );
+                        established.push(connection_id);
+                        if established.len() == 2 {
+                            swarm2.close_connection(established[1]);
+                        }
+                    }
+                    Some(SwarmEvent::ConnectionClosed { .. }) => {
+                        if let Some(tx) = ready_tx.take() {
+                            let _ = tx.send(());
+                        }
+                    }
+                    ev => trace!("peer2: {:?}", ev),
+                }
+            }
+        });
+
+        tokio::time::timeout(Duration::from_secs(30), ready_rx)
+            .await
+            .expect("the recorded connection never closed")
+            .unwrap();
+
+        let received = tokio::time::timeout(
+            Duration::from_secs(30),
+            swarm2_bs.client().get_block(block.cid()),
+        )
+        .await
+        .expect("fetch never completed: bitswap is stranded on the closed connection")
+        .unwrap();
+        assert_eq!(block, received);
+
+        peer1.abort();
+        peer2.abort();
     }
 
     async fn get_block<const N: usize>() {
