@@ -491,7 +491,14 @@ impl MessageQueueActor {
                 "message_queue:{}: failed to send message {:?}",
                 self.peer, err
             );
-            return true;
+            // A send can fail while the connection stays open: a partition
+            // that never resets the socket, a stalled peer, a refused
+            // substream. None of those produce the disconnect that would
+            // rebuild this queue, so exiting here leaves the peer dead for
+            // as long as the connection lives. Keep the loop; the wants stay
+            // on the sent list and the rebroadcast tick resends them.
+            tokio::time::sleep(self.config.send_error_backof).await;
+            return false;
         }
 
         // Record sent time so as to calculate message latency.
@@ -729,5 +736,89 @@ impl MessageQueueActor {
     fn signal_work(&self) {
         // Ignore error, we only want to make sure the loop is aware that there is work to be done.
         let _ = self.outgoing_work.0.try_send(Instant::now());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        pin::Pin,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
+
+    use futures::{future::poll_fn, FutureExt};
+
+    use crate::{
+        block::tests::create_random_block_v1,
+        network::{OutEvent, SendError},
+        protocol::ProtocolId,
+    };
+
+    use super::*;
+
+    /// Accepts every dial and fails every send, counting the attempts.
+    fn fail_every_send(mut network: Network, sends: Arc<AtomicUsize>) -> JoinHandle<()> {
+        tokio::task::spawn(async move {
+            loop {
+                match poll_fn(|cx| Pin::new(&mut network).poll(cx)).await {
+                    OutEvent::Dial { response, .. } => {
+                        let _ = response.send(Ok(Some(ProtocolId::Bitswap120)));
+                    }
+                    OutEvent::SendMessage { response, .. } => {
+                        sends.fetch_add(1, Ordering::SeqCst);
+                        let _ = response.send(Err(SendError::Other("send failed".into())));
+                    }
+                    _ => {}
+                }
+            }
+        })
+    }
+
+    /// A send can fail while the connection stays open: a stalled peer, a
+    /// refused substream, a partition that never resets the socket. Ending the
+    /// actor loop there stops the only task draining this queue, and since no
+    /// disconnect follows, nothing rebuilds it. Every later want for the peer is
+    /// then dropped on a closed channel for as long as the connection lives.
+    #[tokio::test]
+    async fn send_failure_keeps_the_queue_alive_and_rebroadcasts() {
+        let network = Network::new(PeerId::random());
+        let sends = Arc::new(AtomicUsize::new(0));
+        let driver = fail_every_send(network.clone(), sends.clone());
+
+        let config = Config {
+            max_retries: 1,
+            send_timeout: Duration::from_secs(1),
+            send_error_backof: Duration::from_millis(1),
+            rebroadcast_interval: Duration::from_millis(20),
+            ..Default::default()
+        };
+        let queue = MessageQueue::with_config(
+            PeerId::random(),
+            network,
+            config,
+            Arc::new(|_, _| async move {}.boxed()),
+        )
+        .await;
+
+        queue.add_wants(&[create_random_block_v1().cid], &[]).await;
+
+        // The first send fails. The want is already on the sent list, so only the
+        // rebroadcast tick can retry it, and only if the actor is still running.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while sends.load(Ordering::SeqCst) < 2 && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+
+        assert!(
+            queue.is_running(),
+            "a failed send stopped the queue, and no disconnect will rebuild it"
+        );
+        assert!(
+            sends.load(Ordering::SeqCst) >= 2,
+            "the wantlist was never rebroadcast after a failed send"
+        );
+
+        driver.abort();
+        queue.stop().await.unwrap();
     }
 }
