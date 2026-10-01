@@ -11,6 +11,7 @@ rust-version.workspace = true
 [dependencies]
 anyhow.workspace = true
 cid.workspace = true
+multihash-codetable.workspace = true
 config.workspace = true
 ctrlc.workspace = true
 dirs-next.workspace = true

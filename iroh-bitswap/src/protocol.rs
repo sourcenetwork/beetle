@@ -213,7 +213,7 @@ impl Decoder for BitswapCodec {
 
 #[cfg(test)]
 mod tests {
-    use futures::prelude::*;
+
     use libp2p::core::{InboundUpgrade, OutboundUpgrade, UpgradeInfo};
     use multistream_select::{dialer_select_proto, listener_select_proto, Version};
     use tokio::net::{TcpListener, TcpStream};

@@ -81,18 +81,13 @@ pub struct Bitswap<S: Store> {
     _workers: Arc<Vec<JoinHandle<()>>>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum PeerState {
     Connected(ConnectionId),
     Responsive(ConnectionId, ProtocolId),
+    #[default]
     Disconnected,
     DialFailure(Instant),
-}
-
-impl Default for PeerState {
-    fn default() -> Self {
-        PeerState::Disconnected
-    }
 }
 
 impl PeerState {
@@ -522,47 +517,49 @@ impl<S: Store> NetworkBehaviour for Bitswap<S> {
                 // messages are dispatched to any live connection rather than to
                 // that id.
             }
-            FromSwarm::DialFailure(DialFailure { peer_id, error, .. }) => {
-                if let Some(peer_id) = peer_id {
-                    // A dial outcome says nothing about connections that already
-                    // exist. Tearing the peer down here used to leave bitswap's
-                    // view disagreeing with the swarm's, and because the refused
-                    // dial is what would have repaired it, that disagreement was
-                    // permanent.
-                    let connected = self.is_connected(&peer_id);
-                    if matches!(error, libp2p::swarm::DialError::Denied { .. }) {
-                        self.pause_dialing = true;
-                        if !connected {
-                            self.set_peer_state(&peer_id, PeerState::Disconnected);
-                        }
-                    } else if !matches!(
-                        error,
-                        libp2p::swarm::DialError::DialPeerConditionFalse { .. }
-                    ) && !connected
-                    {
-                        self.set_peer_state(&peer_id, PeerState::DialFailure(Instant::now()));
+            FromSwarm::DialFailure(DialFailure {
+                peer_id: Some(peer_id),
+                error,
+                ..
+            }) => {
+                // A dial outcome says nothing about connections that already
+                // exist. Tearing the peer down here used to leave bitswap's
+                // view disagreeing with the swarm's, and because the refused
+                // dial is what would have repaired it, that disagreement was
+                // permanent.
+                let connected = self.is_connected(&peer_id);
+                if matches!(error, libp2p::swarm::DialError::Denied { .. }) {
+                    self.pause_dialing = true;
+                    if !connected {
+                        self.set_peer_state(&peer_id, PeerState::Disconnected);
                     }
+                } else if !matches!(
+                    error,
+                    libp2p::swarm::DialError::DialPeerConditionFalse { .. }
+                ) && !connected
+                {
+                    self.set_peer_state(&peer_id, PeerState::DialFailure(Instant::now()));
+                }
 
-                    trace!("dial_failure {}, {:?}", peer_id, error);
-                    if connected {
-                        // The peer is reachable regardless of what this dial did.
-                        self.resolve_dials(&peer_id, Ok(self.negotiated_protocol(&peer_id)));
-                    } else if matches!(
-                        error,
-                        libp2p::swarm::DialError::DialPeerConditionFalse { .. }
-                    ) {
-                        // A dial is already in flight — its own
-                        // `ConnectionEstablished` will resolve these waiters.
-                        // Failing them here would also fail the caller that
-                        // started that dial, and any behaviour's refused dial
-                        // lands in this arm because `FromSwarm` is broadcast.
-                        trace!(
-                            "dial to {} already in flight, waiters left pending",
-                            peer_id
-                        );
-                    } else {
-                        self.resolve_dials(&peer_id, Err(error.to_string()));
-                    }
+                trace!("dial_failure {}, {:?}", peer_id, error);
+                if connected {
+                    // The peer is reachable regardless of what this dial did.
+                    self.resolve_dials(&peer_id, Ok(self.negotiated_protocol(&peer_id)));
+                } else if matches!(
+                    error,
+                    libp2p::swarm::DialError::DialPeerConditionFalse { .. }
+                ) {
+                    // A dial is already in flight — its own
+                    // `ConnectionEstablished` will resolve these waiters.
+                    // Failing them here would also fail the caller that
+                    // started that dial, and any behaviour's refused dial
+                    // lands in this arm because `FromSwarm` is broadcast.
+                    trace!(
+                        "dial to {} already in flight, waiters left pending",
+                        peer_id
+                    );
+                } else {
+                    self.resolve_dials(&peer_id, Err(error.to_string()));
                 }
             }
             _ => {}
@@ -1268,7 +1265,7 @@ mod tests {
             }
 
             let results = futures::future::join_all(futs).await;
-            for (block, result) in blocks.into_iter().zip(results.into_iter()) {
+            for (block, result) in blocks.into_iter().zip(results) {
                 let received_block = result.unwrap();
                 assert_eq!(block, received_block);
             }
@@ -1292,7 +1289,7 @@ mod tests {
             let mut results = futs.try_collect::<Vec<_>>().await.unwrap();
             results.sort();
             blocks.sort();
-            for (block, received_block) in blocks.into_iter().zip(results.into_iter()) {
+            for (block, received_block) in blocks.into_iter().zip(results) {
                 assert_eq!(block, received_block);
             }
         }
@@ -1307,7 +1304,7 @@ mod tests {
 
             results.sort();
             blocks.sort();
-            for (block, received_block) in blocks.into_iter().zip(results.into_iter()) {
+            for (block, received_block) in blocks.into_iter().zip(results) {
                 assert_eq!(block, received_block);
             }
         }

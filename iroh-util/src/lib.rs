@@ -10,11 +10,9 @@ use std::{
 };
 
 use anyhow::{anyhow, Result};
-use cid::{
-    multihash::{Code, MultihashDigest},
-    Cid,
-};
+use cid::Cid;
 use config::{Config, ConfigError, Environment, File, Map, Source, Value, ValueKind};
+use multihash_codetable::{Code, MultihashDigest};
 use tracing::debug;
 
 pub mod exitcodes;

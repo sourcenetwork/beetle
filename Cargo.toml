@@ -1,25 +1,9 @@
 [workspace]
 members = [
-  "examples/embed",
-  "examples/importer",
-  "iroh",
-  "iroh-api",
   "iroh-bitswap",
-  "iroh-car",
-  "iroh-embed",
-  "iroh-gateway",
   "iroh-localops",
-  "iroh-metrics",
-  "iroh-one",
-  "iroh-p2p",
-  "iroh-resolver",
-  "iroh-rpc-client",
   "iroh-rpc-types",
-  "iroh-share",
-  "iroh-unixfs",
-  "iroh-store",
   "iroh-util",
-  "xtask",
 ]
 # even if all crates are set to edition 2021, we still need to force the
 # resolver to 2

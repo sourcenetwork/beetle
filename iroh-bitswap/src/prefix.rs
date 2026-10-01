@@ -31,8 +31,7 @@ impl Prefix {
         Ok(Prefix {
             version,
             codec,
-            mh_type: Code::try_from(mh_type)
-                .map_err(|e| Error::UnsupportedMultihashCode(e.0))?,
+            mh_type: Code::try_from(mh_type).map_err(|e| Error::UnsupportedMultihashCode(e.0))?,
             mh_len,
         })
     }
