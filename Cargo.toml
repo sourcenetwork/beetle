@@ -14,7 +14,7 @@ resolver = "2"
 version = "0.2.0"
 edition = "2021"
 license = "Apache-2.0/MIT"
-rust-version = "1.65"
+rust-version = "1.88"
 repository = "https://github.com/n0-computer/iroh"
 
 [workspace.dependencies]
